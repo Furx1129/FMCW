@@ -107,7 +107,7 @@ def get_image_path(filename):
 # ============================================================================
 
 # BGT60TR13C 雷达参数
-RADAR_FREQ = 5e9  # 5 GHz
+RADAR_FREQ = 6e10 # 60 GHz
 SPEED_OF_LIGHT = 3e8
 WAVELENGTH = SPEED_OF_LIGHT / RADAR_FREQ  # 0.06 m
 
@@ -116,7 +116,7 @@ NUM_RX_ANTENNAS = 3
 NUM_TX_ANTENNAS = 1
 
 # 帧率和时间参数
-FRAME_RATE = 10.0  # Hz
+FRAME_RATE = 20.0  # Hz
 FRAME_PERIOD = 1.0 / FRAME_RATE  # 秒
 
 # 生命体征参数

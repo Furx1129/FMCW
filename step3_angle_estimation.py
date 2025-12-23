@@ -1,43 +1,142 @@
 import numpy as np
+import warnings
+import matplotlib
+
+# 必须在导入 pyplot 之前设置后端和过滤警告
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', message='.*Glyph.*')
+warnings.filterwarnings('ignore', message='.*glyph.*')
+warnings.filterwarnings('ignore', message='.*font.*')
+matplotlib.use('Agg')  # 使用非交互式后端避免 Tkinter 字形问题
+
 import matplotlib.pyplot as plt
 from scipy import signal
+from config import *
 
 # ============================================================================
 # 中文字体配置
 # ============================================================================
-plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
+plt.rcParams['mathtext.fontset'] = 'dejavusans'
+plt.rcParams['mathtext.default'] = 'regular'
+
+# ============================================================================
+# BGT60TR13C 天线布局信息
+# ============================================================================
+"""
+重要：BGT60TR13C 接收天线布局
+=========================================
+
+天线布局: L型 (Linear + Planar)
+- RX1 (antenna_idx=0): 位置 (0, 0)      [参考点，x轴第一根]
+- RX2 (antenna_idx=1): 位置 (λ/2, 0)    [x轴第二根]
+- RX3 (antenna_idx=2): 位置 (0, λ/2)    [y轴第一根]
+
+波长 λ = c / f = 3e8 / 5e9 = 0.06m
+天线间距 d = λ/2 = 0.03m
+
+这与传统的线性阵列 [0, λ/2, λ] 不同！
+
+处理建议：
+=========================================
+方案1（简化）：只使用RX1和RX2计算方位角 ← 当前使用方案
+- 利用x轴上的两根天线测量水平角度 (Azimuth)
+- 忽略y轴天线的信息
+- 优点：计算简单，易于理解
+- 缺点：无法测量仰角，分辨率略低
+
+方案2（完整）：使用所有3根天线的L型导向矢量
+- 构建2D导向矢量: a(θ,φ) 
+- θ: 方位角 (Azimuth)
+- φ: 仰角 (Elevation)
+- 需要2D MVDR谱 (计算量大)
+"""
+
+# ============================================================================
+# 天线阵列配置类
+# ============================================================================
+
+class BGT60AntennaArray:
+    """
+    BGT60TR13C 天线阵列配置类
+    
+    存储天线位置和相关计算
+    """
+    def __init__(self, wavelength=WAVELENGTH):
+        """
+        初始化天线阵列
+        
+        参数：
+            wavelength: 波长 (m)，默认使用config.py中的WAVELENGTH (60GHz=0.005m)
+        """
+        self.wavelength = wavelength
+        self.d = wavelength / 2  # 天线间距
+        
+        # L型天线位置 (单位: m)
+        # RX1: 参考点
+        # RX2: x轴方向
+        # RX3: y轴方向
+        self.antenna_positions = {
+            'RX1': np.array([0.0, 0.0]),
+            'RX2': np.array([self.d, 0.0]),
+            'RX3': np.array([0.0, self.d])
+        }
+        
+        print("\n" + "=" * 70)
+        print("BGT60TR13C 天线阵列配置")
+        print("=" * 70)
+        print(f"\n✓ 天线布局: L型 (Linear + Planar)")
+        print(f"  波长 λ: {wavelength*100:.2f} cm")
+        print(f"  天线间距 d: {self.d*100:.2f} cm")
+        print(f"\n✓ 天线位置:")
+        for name, pos in self.antenna_positions.items():
+            print(f"  {name}: ({pos[0]*100:.2f}cm, {pos[1]*100:.2f}cm)")
+        print(f"\n⚠️ 重要: 该配置为L型，非线性阵列")
+        print(f"  采用简化方案: 仅使用RX1和RX2计算方位角")
 
 # ============================================================================
 # 步骤 3：高阶角度估计 (MVDR Angle Estimation)
+# ⚠️ 重要：为了与 Step 4 的波束形成匹配，本步骤仅使用 RX1 和 RX2（2个天线）
 # ============================================================================
 
 def calculate_covariance_matrix(target_signal):
     """
-    计算协方差矩阵 R = X^H X
+    计算协方差矩阵 R = (X^H * X) / num_frames
     
     输入：
-        target_signal: 目标信号，形状 (frames, rx=3)
-                      复数矩阵，每一行是一帧的3个天线接收信号
+        target_signal: 目标信号，形状 (frames, rx)
+                      复数矩阵，每一行是一帧的天线接收信号
     
     输出：
-        R: 协方差矩阵，形状 (3, 3)
-           R = X^H X，其中 X^H 是 X 的共轭转置
+        R: 协方差矩阵，形状 (num_rx, num_rx)
+           R = (X^H * X) / num_frames，其中 X^H 是 X 的共轭转置
+    
+    重要：仅使用 RX1 和 RX2（前两个通道）
     """
     
     print("\n" + "=" * 70)
     print("步骤3.1：计算协方差矩阵")
     print("=" * 70)
     
+    # 提取前两个天线（RX1, RX2）
+    if target_signal.shape[1] > 2:
+        print(f"\n⚠️ 原始信号有 {target_signal.shape[1]} 个天线")
+        print(f"   为适配L型天线简化方案，仅使用前两个（RX1, RX2）")
+        target_signal = target_signal[:, :2]
+    
+    num_frames, num_rx = target_signal.shape
+    
     print(f"  输入信号形状: {target_signal.shape}")
-    print(f"  = (帧数={target_signal.shape[0]}, 天线数={target_signal.shape[1]})")
+    print(f"  = (帧数={num_frames}, 天线数={num_rx})")
     
     # X^H 是 X 的共轭转置
-    # target_signal.conj().T 即为 X^H，形状为 (3, frames)
-    # 相乘得到 (3, frames) @ (frames, 3) = (3, 3)
+    # target_signal.conj().T: (num_rx, num_frames)
+    # target_signal: (num_frames, num_rx)
+    # 相乘得到: (num_rx, num_frames) @ (num_frames, num_rx) = (num_rx, num_rx)
     
-    print(f"\n✓ 计算 R = X^H * X...")
-    R = target_signal.conj().T @ target_signal
+    print(f"\n✓ 计算 R = (X^H * X) / num_frames...")
+    R = (target_signal.conj().T @ target_signal) / num_frames
     
     print(f"  协方差矩阵形状: {R.shape}")
     print(f"  协方差矩阵是 Hermitian 矩阵: {np.allclose(R, R.conj().T)}")
@@ -66,10 +165,10 @@ def compute_inverse_covariance(R):
     计算协方差矩阵的逆（使用伪逆防止奇异）
     
     输入：
-        R: 协方差矩阵，形状 (3, 3)
+        R: 协方差矩阵，形状 (num_rx, num_rx)
     
     输出：
-        R_inv: 逆矩阵，形状 (3, 3)
+        R_inv: 逆矩阵，形状 (num_rx, num_rx)
     """
     
     print("\n" + "=" * 70)
@@ -86,32 +185,39 @@ def compute_inverse_covariance(R):
     print(f"  逆矩阵形状: {R_inv.shape}")
     
     # 验证：R * R_inv 应该接近单位矩阵
+    # 自动适应矩阵维度
     identity_check = R @ R_inv
-    error = np.linalg.norm(identity_check - np.eye(3))
+    expected_identity = np.eye(R.shape[0])
+    error = np.linalg.norm(identity_check - expected_identity)
     print(f"  验证 R * R^(-1) ≈ I: 误差 = {error:.6f}")
     
     return R_inv
 
 
-def steering_vector(angle_deg, num_antennas=3, wavelength=0.06):
+def steering_vector(angle_deg, num_antennas=2, wavelength=WAVELENGTH):
     """
     生成导向矢量 a(θ)
     
+    仅使用RX1和RX2（x轴方向）的线性子阵
+    
     物理原理：
-    三根天线均匀排列，相邻天线间距 d = λ/2 = 0.03m
+    两根天线沿x轴排列，相邻天线间距 d = λ/2
     当信号从角度 θ 到达时，不同天线接收到的相位差为：
         Δφ = 2π * d * sin(θ) / λ
     
-    导向矢量：a(θ) = [1, exp(j*2π*d*sin(θ)/λ), exp(j*4π*d*sin(θ)/λ)]
+    导向矢量：a(θ) = [1, exp(j*2π*d*sin(θ)/λ)]^T
     
     输入：
         angle_deg: 角度（度），范围 -90° ~ +90°
-        num_antennas: 天线数（默认3）
-        wavelength: 波长，单位 m（默认0.06m，对应5GHz）
+        num_antennas: 天线数（固定为2，对应RX1和RX2）
+        wavelength: 波长，单位 m（默认使用config.py中的WAVELENGTH，60GHz=0.005m）
     
     输出：
-        a: 导向矢量，形状 (num_antennas, 1)
+        a: 导向矢量，形状 (2, 1)
     """
+    
+    if num_antennas != 2:
+        raise ValueError(f"此步骤只支持2个天线，收到 {num_antennas} 个天线")
     
     # 转换为弧度
     angle_rad = np.deg2rad(angle_deg)
@@ -122,12 +228,11 @@ def steering_vector(angle_deg, num_antennas=3, wavelength=0.06):
     # 相位差步长
     phase_step = 2 * np.pi * d * np.sin(angle_rad) / wavelength
     
-    # 生成导向矢量
+    # 生成导向矢量（仅包含RX1和RX2）
     a = np.array([
-        np.exp(1j * 0 * phase_step),           # 天线0：参考点
-        np.exp(1j * 1 * phase_step),           # 天线1
-        np.exp(1j * 2 * phase_step)            # 天线2
-    ]).reshape(-1, 1)  # 形状 (3, 1)
+        np.exp(1j * 0),           # RX1：参考点
+        np.exp(1j * phase_step)   # RX2
+    ]).reshape(-1, 1)  # 形状 (2, 1)
     
     return a
 
@@ -297,14 +402,106 @@ def visualize_beampattern(R_inv, save_path="beampattern.png"):
     plt.show()
 
 
-def compare_with_conventional_beamformer(target_signal, save_path="beamformer_comparison.png"):
+def visualize_antenna_layout(antenna_array, save_path=None):
+    """
+    可视化天线布局
+    
+    参数：
+        antenna_array: BGT60AntennaArray 对象
+        save_path: 保存路径，如为None则使用get_image_path
+    """
+    
+    if save_path is None:
+        save_path = get_image_path("antenna_layout.png")
+    
+    fig, ax = plt.subplots(figsize=(10, 10))
+    
+    # 绘制天线位置
+    antenna_names = ['RX1', 'RX2', 'RX3']
+    colors = ['red', 'blue', 'green']
+    
+    for (name, pos), color in zip(antenna_array.antenna_positions.items(), colors):
+        ax.scatter(pos[0]*100, pos[1]*100, s=200, c=color, marker='o', 
+                  edgecolors='black', linewidth=2, label=name, zorder=3)
+        ax.annotate(name, (pos[0]*100, pos[1]*100), 
+                   xytext=(5, 5), textcoords='offset points', fontsize=12, fontweight='bold')
+    
+    # 绘制连接线
+    ax.plot([0, antenna_array.d*100], [0, 0], 'b--', linewidth=2, alpha=0.5)  # RX1-RX2
+    ax.plot([0, 0], [0, antenna_array.d*100], 'g--', linewidth=2, alpha=0.5)  # RX1-RX3
+    
+    # 标注距离
+    ax.text(antenna_array.d*100/2, -0.2, f'd={antenna_array.d*100:.1f}cm', 
+           ha='center', fontsize=10, fontweight='bold')
+    ax.text(-0.5, antenna_array.d*100/2, f'd={antenna_array.d*100:.1f}cm', 
+           ha='right', fontsize=10, fontweight='bold')
+    
+    ax.set_xlim(-1, 4)
+    ax.set_ylim(-1, 4)
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.3)
+    ax.set_xlabel('X 方向 (cm)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Y 方向 (cm)', fontsize=12, fontweight='bold')
+    ax.set_title('BGT60TR13C 天线布局 (L型)', fontsize=14, fontweight='bold')
+    ax.legend(fontsize=11, loc='upper right')
+    
+    plt.tight_layout()
+    print(f"\n✓ 保存天线布局图到: {save_path}")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def visualize_beampattern_polar(R_inv, save_path=None):
+    """
+    可视化波束方向图（极坐标）
+    
+    参数：
+        R_inv: 协方差矩阵的逆
+        save_path: 保存路径，如为None则使用get_image_path
+    """
+    
+    if save_path is None:
+        save_path = get_image_path("beampattern.png")
+    
+    # 计算MVDR谱（更细的分辨率用于绘图）
+    spectrum, angles, _ = mvdr_spectrum(R_inv, angle_range=(-90, 90, 0.1))
+    
+    fig = plt.figure(figsize=(12, 10))
+    
+    # 极坐标图
+    ax = fig.add_subplot(111, projection='polar')
+    
+    # 转换为极坐标
+    angles_rad = np.deg2rad(angles)
+    spectrum_normalized = spectrum / np.max(spectrum)
+    
+    ax.plot(angles_rad, spectrum_normalized, 'b-', linewidth=2.5)
+    ax.fill(angles_rad, spectrum_normalized, alpha=0.25, color='blue')
+    
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+    ax.set_title('MVDR波束方向图 (BGT60TR13C L型天线阵列)\n极坐标表示', 
+                fontsize=14, fontweight='bold', pad=20)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    print(f"✓ 保存波束方向图到: {save_path}")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def compare_with_conventional_beamformer(target_signal, save_path=None):
     """
     对比MVDR与传统波束合成的性能
     
     输入：
         target_signal: 目标信号 (frames, 3)
-        save_path: 保存路径
+        save_path: 保存路径，如为None则使用get_image_path
     """
+    
+    if save_path is None:
+        save_path = get_image_path("beamformer_comparison.png")
     
     print("\n" + "=" * 70)
     print("步骤3.4：与传统波束合成对比")
@@ -388,10 +585,15 @@ if __name__ == "__main__":
     print("=" * 70)
     print("开始处理雷达信号 - 步骤3：高阶角度估计(MVDR)")
     print("=" * 70 + "\n")
+    print("⚠️ 重要: 采用L型天线简化方案")
+    print("   仅使用RX1和RX2（x轴方向）计算方位角\n")
+    
+    # 初始化天线阵列配置
+    antenna_array = BGT60AntennaArray(wavelength=0.06)
     
     # 加载步骤2的处理结果
-    print("加载步骤2的处理结果...")
-    target_signal = np.load("results/test1_target_signal.npy")
+    print("\n加载步骤2的处理结果...")
+    target_signal = np.load(TARGET_SIGNAL_FILE)
     print(f"✓ 已加载目标信号: {target_signal.shape}\n")
     
     # 步骤3.1：计算协方差矩阵
@@ -406,18 +608,25 @@ if __name__ == "__main__":
     print("=" * 70)
     mvdr_spectrum_data, angles, peak_angle = mvdr_spectrum(R_inv)
     
+    # 可视化天线布局
+    print("\n" + "=" * 70)
+    print("绘制天线布局图")
+    print("=" * 70)
+    visualize_antenna_layout(antenna_array, 
+                            save_path=get_image_path("antenna_layout.png"))
+    
     # 可视化MVDR谱
     print("\n" + "=" * 70)
     print("可视化MVDR角度估计结果")
     print("=" * 70)
     visualize_mvdr_spectrum(mvdr_spectrum_data, angles, peak_angle, 
-                           save_path="results/mvdr_spectrum.png")
+                           save_path=get_image_path("mvdr_spectrum.png"))
     
     # 可视化波束方向图
     print("\n" + "=" * 70)
     print("绘制波束方向图")
     print("=" * 70)
-    visualize_beampattern(R_inv, save_path="results/beampattern.png")
+    visualize_beampattern_polar(R_inv, save_path=get_image_path("beampattern.png"))
     
     # 对比MVDR与传统波束合成
     print("\n" + "=" * 70)
@@ -425,18 +634,21 @@ if __name__ == "__main__":
     print("=" * 70)
     mvdr_angle, conventional_angle = compare_with_conventional_beamformer(
         target_signal, 
-        save_path="results/beamformer_comparison.png"
+        save_path=get_image_path("beamformer_comparison.png")
     )
     
     # 保存结果
     print("\n" + "=" * 70)
     print("保存处理结果")
     print("=" * 70)
-    np.save("results/test1_covariance_matrix.npy", R)
-    np.save("results/test1_mvdr_spectrum.npy", mvdr_spectrum_data)
+    np.save(COVARIANCE_MATRIX_FILE, R)
+    np.save(COVARIANCE_MATRIX_INV_FILE, R_inv)
+    np.save(MVDR_SPECTRUM_FILE, mvdr_spectrum_data)
     
-    print("✓ test1_covariance_matrix.npy (协方差矩阵)")
-    print("✓ test1_mvdr_spectrum.npy (MVDR谱)")
+    print(f"✓ 已保存到 {RESULT_DIR}/")
+    print(f"  covariance_matrix.npy (协方差矩阵)")
+    print(f"  covariance_matrix_inv.npy (协方差矩阵的逆)")
+    print(f"  mvdr_spectrum.npy (MVDR谱)")
     
     # 最终总结
     print("\n" + "=" * 70)
@@ -446,7 +658,8 @@ if __name__ == "__main__":
     print(f"   MVDR方法: {mvdr_angle:.2f}°")
     print(f"   传统方法: {conventional_angle:.2f}°")
     print(f"\n📊 生成的可视化图片:")
-    print(f"   ✓ results/mvdr_spectrum.png (MVDR谱)")
-    print(f"   ✓ results/beampattern.png (波束方向图)")
-    print(f"   ✓ results/beamformer_comparison.png (方法对比)")
-    print("\n下一步：相位提取与心跳呼吸分离（步骤4）")
+    print(f"   ✓ antenna_layout.png (天线布局)")
+    print(f"   ✓ mvdr_spectrum.png (MVDR谱)")
+    print(f"   ✓ beampattern.png (波束方向图)")
+    print(f"   ✓ beamformer_comparison.png (方法对比)")
+    print(f"\n✅ 下一步：数字波束形成（步骤4）")

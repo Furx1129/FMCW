@@ -1,60 +1,63 @@
 import numpy as np
+import warnings
+import matplotlib
+
+# 必须在导入 pyplot 之前设置后端和过滤警告
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', message='.*Glyph.*')
+warnings.filterwarnings('ignore', message='.*glyph.*')
+warnings.filterwarnings('ignore', message='.*font.*')
+matplotlib.use('Agg')  # 使用非交互式后端避免 Tkinter 字形问题
+
 import matplotlib.pyplot as plt
 from scipy import signal
 from config import *
-import matplotlib
-import warnings
 
 # ============================================================================
 # 中文字体配置
 # ============================================================================
-# 忽略所有 matplotlib 和 tkinter 字体相关的警告
-warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
-warnings.filterwarnings('ignore', category=UserWarning, module='tkinter')
-warnings.filterwarnings('ignore', message='.*Glyph.*missing.*')
-warnings.filterwarnings('ignore', message='.*does not have a glyph.*')
-warnings.filterwarnings('ignore', message='.*Substituting.*')
-
-# 使用 Agg 后端避免 Tkinter 字形警告
-matplotlib.use('Agg')
-
-# 禁用 Unicode 减号，使用 ASCII 减号
-plt.rcParams['axes.unicode_minus'] = False
-# 使用 DejaVu 字体作为数学文本字体
+plt.rcParams['axes.unicode_minus'] = False  # 使用 ASCII 减号代替 Unicode 减号
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['mathtext.fontset'] = 'dejavusans'
 plt.rcParams['mathtext.default'] = 'regular'
-plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
 
 # ============================================================================
 # 步骤 4：数字波束形成 (Digital Beamforming)
 # ============================================================================
+# 重要说明：与 Step 3 保持一致，仅使用 RX1 和 RX2（2个天线）
+#          这是针对 BGT60TR13C L型天线的简化方案
 
-def steering_vector(angle_deg, num_antennas=3, wavelength=0.06):
+def steering_vector(angle_deg, num_antennas=2, wavelength=3e8/60e9):
     """
     生成导向矢量 a(θ)
     
+    仅使用RX1和RX2（x轴方向）的线性子阵来计算方位角
+    
     输入：
         angle_deg: 角度（度）
-        num_antennas: 天线数（默认3）
-        wavelength: 波长，单位 m（默认0.06m，对应5GHz）
+        num_antennas: 天线数（固定为2，对应RX1和RX2）
+        wavelength: 波长，单位 m（默认0.005m，对应60GHz）
     
     输出：
-        a: 导向矢量，形状 (num_antennas, 1)
+        a: 导向矢量，形状 (2, 1)
     """
+    if num_antennas != 2:
+        raise ValueError(f"此步骤只支持2个天线，收到 {num_antennas} 个天线")
+    
     angle_rad = np.deg2rad(angle_deg)
     d = wavelength / 2
     phase_step = 2 * np.pi * d * np.sin(angle_rad) / wavelength
     
+    # 仅包含 RX1 和 RX2 的导向矢量
     a = np.array([
-        np.exp(1j * 0),
-        np.exp(1j * phase_step),
-        np.exp(1j * 0)
+        np.exp(1j * 0),           # RX1
+        np.exp(1j * phase_step)   # RX2
     ]).reshape(-1, 1)
     
     return a
 
 
-def compute_mvdr_weights(R_inv, target_angle, wavelength=0.06):
+def compute_mvdr_weights(R_inv, target_angle, wavelength=3e8/60e9):
     """
     计算MVDR最优权重
     
@@ -64,7 +67,7 @@ def compute_mvdr_weights(R_inv, target_angle, wavelength=0.06):
     输入：
         R_inv: 协方差矩阵的逆，形状 (3, 3)
         target_angle: 目标方位角（度）
-        wavelength: 波长 (m)
+        wavelength: 波长 (m)，默认0.005m对应60GHz
     
     输出：
         W_opt: 最优权重，形状 (3, 1)
@@ -93,8 +96,8 @@ def apply_beamforming(target_signal, W_opt):
     应用波束形成
     
     输入：
-        target_signal: 目标信号，形状 (frames, rx=3)
-        W_opt: 最优权重，形状 (3, 1)
+        target_signal: 目标信号，形状 (frames, rx=2) [仅RX1和RX2]
+        W_opt: 最优权重，形状 (2, 1)
     
     输出：
         beamformed_signal: 波束形成后的信号，形状 (frames,)
@@ -105,6 +108,13 @@ def apply_beamforming(target_signal, W_opt):
     print("=" * 70)
     
     print(f"\n✓ 输入信号形状: {target_signal.shape}")
+    print(f"  (仅使用 RX1 和 RX2 两个天线)")
+    print(f"✓ 权重向量形状: {W_opt.shape}")
+    
+    # 验证维度
+    if target_signal.shape[1] != W_opt.shape[0]:
+        raise ValueError(f"维度不匹配: 信号有 {target_signal.shape[1]} 个通道，"
+                        f"但权重有 {W_opt.shape[0]} 个")
     
     # 波束形成：y(t) = W^H * x(t)
     beamformed_signal = (target_signal @ W_opt).flatten()
@@ -121,18 +131,18 @@ def compare_single_vs_beamformed(target_signal, beamformed_signal,
     对比单通道和波束形成信号
     
     参数：
-        target_signal: 原始目标信号，形状 (frames, rx=3)
+        target_signal: 原始目标信号，形状 (frames, rx=2) [RX1, RX2]
         beamformed_signal: 波束形成后的信号，形状 (frames,)
         save_path: 保存路径
     """
     
-    fig, axes = plt.subplots(3, 2, figsize=(16, 12))
-    fig.suptitle('波束形成效果对比', fontsize=14, fontweight='bold')
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('波束形成效果对比 (RX1 + RX2)', fontsize=14, fontweight='bold')
     
     frames = min(100, target_signal.shape[0])  # 显示前100帧
     
-    # 三个通道的原始信号
-    for rx in range(3):
+    # 两个通道的原始信号
+    for rx in range(2):
         ax = axes[rx, 0]
         ax.plot(target_signal[:frames, rx], linewidth=1, label=f'RX{rx+1}')
         ax.set_title(f'RX{rx+1} 原始信号（前100帧）', fontsize=12, fontweight='bold')
@@ -142,20 +152,26 @@ def compare_single_vs_beamformed(target_signal, beamformed_signal,
         ax.legend()
     
     # 波束形成后的信号
-    for rx in range(3):
-        ax = axes[rx, 1]
-        if rx == 0:
-            ax.plot(beamformed_signal[:frames], linewidth=1.5, color='green', 
-                   label='波束形成输出')
-        else:
-            ax.plot(target_signal[:frames, rx], linewidth=1, alpha=0.5, 
-                   label=f'RX{rx+1} (参考)')
-        ax.set_title(f'波束形成输出（前100帧）' if rx == 0 else f'通道对比', 
-                    fontsize=12, fontweight='bold')
-        ax.set_xlabel('帧索引')
-        ax.set_ylabel('幅度')
-        ax.grid(True, alpha=0.3)
-        ax.legend()
+    ax = axes[0, 1]
+    ax.plot(beamformed_signal[:frames], linewidth=1.5, color='green', 
+           label='波束形成输出')
+    ax.set_title('波束形成输出（前100帧）', fontsize=12, fontweight='bold')
+    ax.set_xlabel('帧索引')
+    ax.set_ylabel('幅度')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    
+    # 频谱对比
+    ax = axes[1, 1]
+    fft_beamformed = np.fft.fft(beamformed_signal)
+    freqs = np.fft.fftfreq(len(beamformed_signal))
+    ax.semilogy(freqs[:len(freqs)//2], np.abs(fft_beamformed[:len(freqs)//2]), 
+               linewidth=1.5, color='green', label='波束形成')
+    ax.set_title('频域对比', fontsize=12, fontweight='bold')
+    ax.set_xlabel('归一化频率')
+    ax.set_ylabel('幅度')
+    ax.grid(True, alpha=0.3, which='both')
+    ax.legend()
     
     plt.tight_layout()
     print(f"\n✓ 保存波束形成对比图到: {save_path}")
@@ -236,7 +252,7 @@ def visualize_signal_improvement(target_signal, beamformed_signal,
     可视化信号改进效果
     
     参数：
-        target_signal: 原始目标信号，形状 (frames, rx=3)
+        target_signal: 原始目标信号，形状 (frames, rx=2) [RX1, RX2]
         beamformed_signal: 波束形成信号，形状 (frames,)
         save_path: 保存路径
     """
@@ -251,13 +267,13 @@ def visualize_signal_improvement(target_signal, beamformed_signal,
     power_avg = np.mean(power_rx)
     
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle('波束形成信号改进效果', fontsize=14, fontweight='bold')
+    fig.suptitle('波束形成信号改进效果 (RX1 + RX2)', fontsize=14, fontweight='bold')
     
     # 左图：功率对比
     ax = axes[0]
-    channels = ['RX1', 'RX2', 'RX3', '平均', '波束形成']
+    channels = ['RX1', 'RX2', '平均', '波束形成']
     powers = list(power_rx) + [power_avg, power_beamformed]
-    colors = ['blue', 'blue', 'blue', 'orange', 'green']
+    colors = ['blue', 'blue', 'orange', 'green']
     
     bars = ax.bar(channels, powers, color=colors, alpha=0.7, edgecolor='black', linewidth=2)
     ax.set_ylabel('平均功率', fontsize=12, fontweight='bold')
@@ -274,7 +290,7 @@ def visualize_signal_improvement(target_signal, beamformed_signal,
     ax = axes[1]
     gain_rx = 10 * np.log10(power_beamformed / power_rx + 1e-10)
     
-    bars = ax.bar(['RX1', 'RX2', 'RX3'], gain_rx, color='red', alpha=0.7, 
+    bars = ax.bar(['RX1', 'RX2'], gain_rx, color='red', alpha=0.7, 
                   edgecolor='black', linewidth=2)
     ax.axhline(0, color='black', linestyle='--', linewidth=1)
     ax.set_ylabel('增益 (dB)', fontsize=12, fontweight='bold')
@@ -302,15 +318,28 @@ if __name__ == "__main__":
     print("=" * 70)
     print("开始处理雷达信号 - 步骤4：数字波束形成")
     print("=" * 70 + "\n")
+    print("⚠️ 重要: 采用L型天线简化方案")
+    print("   仅使用RX1和RX2（x轴方向）进行波束形成\n")
     
     # 加载数据
     print("加载处理结果...")
     target_signal = np.load(TARGET_SIGNAL_FILE)
-    R_inv = np.load(COVARIANCE_MATRIX_FILE)  # 需要在step3中保存
+    R_inv = np.load(COVARIANCE_MATRIX_INV_FILE)  # 从step3中加载2x2协方差矩阵逆
     mvdr_spectrum_data = np.load(MVDR_SPECTRUM_FILE)
     
     print(f"✓ 已加载目标信号: {target_signal.shape}")
-    print(f"✓ 已加载协方差矩阵逆: {R_inv.shape}\n")
+    print(f"✓ 已加载协方差矩阵逆: {R_inv.shape}")
+    
+    # 验证维度：目标信号应该是 (frames, 2)
+    if target_signal.shape[1] != 2:
+        print(f"\n⚠️ 警告: 目标信号有 {target_signal.shape[1]} 个通道")
+        print(f"         预期为 2 个通道 (RX1, RX2)")
+        if target_signal.shape[1] > 2:
+            print(f"         自动提取前两个通道...")
+            target_signal = target_signal[:, :2]
+            print(f"         调整后: {target_signal.shape}")
+    
+    print(f"✓ 协方差矩阵逆维度: {R_inv.shape} (预期 2x2)\n")
     
     # 从MVDR谱中获取峰值角度 (这里简化处理，实际应从step3传入)
     angles = np.linspace(-60, 60, len(mvdr_spectrum_data))
